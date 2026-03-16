@@ -1,351 +1,122 @@
 import aiohttp
 import aiosqlite
+import asyncio
+import logging
 from telegram import ReplyKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+# Logging setup
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# --- CONFIG ---
 TOKEN = "8659832644:AAGG8M0i6zWRas4e_j80FLYWFraaQu8vZ7k"
 ADMIN_ID = 7276206449
-
 FORCE_CHANNEL = "@mbtcyber"
 LOG_CHANNEL = -1002740128760
+API_URL = "https://bmttts.wuaze.com/subapi.php?chat_id="
 
-API = "https://bmttts.wuaze.com/subapi.php?chat_id="
+# --- MENUS ---
+main_menu = ReplyKeyboardMarkup([["🔎 Search", "📊 My Stats"], ["👥 Refer", "ℹ️ Help"]], resize_keyboard=True)
+back_menu = ReplyKeyboardMarkup([["🔙 Back"]], resize_keyboard=True)
 
-main_menu = ReplyKeyboardMarkup(
-[
-["🔎 Search","📊 My Stats"],
-["👥 Refer","ℹ️ Help"]
-],
-resize_keyboard=True
-)
-
-back_menu = ReplyKeyboardMarkup(
-[
-["🔙 Back"]
-],
-resize_keyboard=True
-)
-
-# ---------------- DATABASE ----------------
-
+# --- DB INIT ---
 async def init_db():
     async with aiosqlite.connect("bot.db") as db:
-
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS users(
-        user_id INTEGER PRIMARY KEY,
-        credits INTEGER DEFAULT 2,
-        ref_by INTEGER,
-        searches INTEGER DEFAULT 0
-        )
-        """)
-
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS settings(
-        status INTEGER
-        )
-        """)
-
-        row = await db.execute("SELECT * FROM settings")
-
-        if await row.fetchone() is None:
-            await db.execute("INSERT INTO settings VALUES(1)")
-
+        await db.execute("""CREATE TABLE IF NOT EXISTS users
+            (user_id INTEGER PRIMARY KEY, credits INTEGER DEFAULT 2, ref_by INTEGER, searches INTEGER DEFAULT 0)""")
         await db.commit()
 
-# ---------------- FORCE JOIN ----------------
-
-async def check_join(bot,user):
-
+# --- FUNCTIONS ---
+async def check_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        member = await bot.get_chat_member(FORCE_CHANNEL,user)
-        return member.status in ["member","administrator","creator"]
+        member = await context.bot.get_chat_member(FORCE_CHANNEL, update.effective_user.id)
+        if member.status in ["member", "administrator", "creator"]:
+            return True
     except:
-        return False
+        pass
+    await update.message.reply_text(f"⚠️ Prothome channel-e join koro: {FORCE_CHANNEL}")
+    return False
 
-# ---------------- START ----------------
-
-async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user.id
-
-    if not await check_join(context.bot,user):
-
-        await update.message.reply_text(
-        f"⚠️ Join channel first:\nhttps://t.me/{FORCE_CHANNEL.replace('@','')}"
-        )
-        return
-
-    ref=None
-
-    if context.args:
-        ref=int(context.args[0])
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_join(update, context): return
+    
+    user_id = update.effective_user.id
+    ref_id = int(context.args[0]) if context.args and context.args[0].isdigit() else None
 
     async with aiosqlite.connect("bot.db") as db:
-
-        cur = await db.execute("SELECT * FROM users WHERE user_id=?",(user,))
-        data = await cur.fetchone()
-
-        if not data:
-
-            await db.execute(
-            "INSERT INTO users(user_id,ref_by) VALUES(?,?)",(user,ref)
-            )
-
-            if ref and ref!=user:
-                await db.execute(
-                "UPDATE users SET credits=credits+2 WHERE user_id=?",(ref,)
-                )
-
+        cur = await db.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
+        if not await cur.fetchone():
+            await db.execute("INSERT INTO users(user_id, ref_by) VALUES(?,?)", (user_id, ref_id))
+            if ref_id and ref_id != user_id:
+                await db.execute("UPDATE users SET credits = credits + 2 WHERE user_id=?", (ref_id,))
             await db.commit()
-
-    await update.message.reply_text(
-    "🎉 Welcome!\nYou received 2 credits.",
-    reply_markup=main_menu
-    )
-
-# ---------------- STATS ----------------
-
-async def stats(update:Update):
-
-    user = update.effective_user.id
-
-    async with aiosqlite.connect("bot.db") as db:
-
-        cur = await db.execute(
-        "SELECT credits,searches FROM users WHERE user_id=?",(user,)
-        )
-
-        data = await cur.fetchone()
-
-    msg=f"""
-📊 Your Stats
-
-💳 Credits : {data[0]}
-🔎 Searches : {data[1]}
-"""
-
-    await update.message.reply_text(msg,reply_markup=main_menu)
-
-# ---------------- REFER ----------------
-
-async def refer(update:Update,context):
-
-    user = update.effective_user.id
-    link=f"https://t.me/{context.bot.username}?start={user}"
-
-    msg=f"""
-👥 Referral System
-
-Invite friends and earn 2 credits.
-
-🔗 Your link:
-{link}
-"""
-
-    await update.message.reply_text(msg,reply_markup=main_menu)
-
-# ---------------- SEARCH MODE ----------------
-
-async def search(update:Update,context):
-
-    context.user_data["mode"]="search"
-
-    await update.message.reply_text(
-    "Send chat id to search",
-    reply_markup=back_menu
-    )
-
-# ---------------- API CALL ----------------
-
-async def api_call(uid):
-
-    async with aiohttp.ClientSession() as s:
-        async with s.get(API+str(uid)) as r:
-            return await r.json()
-
-# ---------------- MESSAGE HANDLER ----------------
-
-async def messages(update:Update,context:ContextTypes.DEFAULT_TYPE):
-
-    text = update.message.text
-    user = update.effective_user.id
-
-    if text=="🔙 Back":
-        context.user_data.clear()
-        await update.message.reply_text("Back",reply_markup=main_menu)
-        return
-
-    if text=="🔎 Search":
-        await search(update,context)
-        return
-
-    if text=="📊 My Stats":
-        await stats(update)
-        return
-
-    if text=="👥 Refer":
-        await refer(update,context)
-        return
-
-    if context.user_data.get("mode")!="search":
-        return
-
-    async with aiosqlite.connect("bot.db") as db:
-
-        cur = await db.execute(
-        "SELECT credits FROM users WHERE user_id=?",(user,)
-        )
-
-        credit=(await cur.fetchone())[0]
-
-        if credit<=0:
-            await update.message.reply_text("❌ No credits left")
-            return
-
-        await update.message.reply_text("⏳ Searching...")
-
-        data = await api_call(text)
-
-        if data["data"]["found"]:
-
-            msg=f"""
-✅ Result Found
-
-📱 Number : {data['data']['number']}
-🌍 Country : {data['data']['country']}
-💬 {data['data']['message']}
-⏱ {data['response_time']}
-
-{data['credit']}
-"""
-
+            await update.message.reply_text("🎁 Welcome! 2 credits bonus peyechho.", reply_markup=main_menu)
         else:
-            msg="❌ Not Found"
+            await update.message.reply_text("Ki obostha mama? Abaro shagoto!", reply_markup=main_menu)
 
-        await db.execute(
-        "UPDATE users SET credits=credits-1,searches=searches+1 WHERE user_id=?",(user,)
-        )
+async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.effective_user.id
 
-        await db.commit()
+    if text == "🔙 Back":
+        context.user_data.clear()
+        return await update.message.reply_text("Main Menu-te firiye ana holo.", reply_markup=main_menu)
 
-    await update.message.reply_text(msg)
+    if text == "📊 My Stats":
+        async with aiosqlite.connect("bot.db") as db:
+            cur = await db.execute("SELECT credits, searches FROM users WHERE user_id=?", (user_id,))
+            data = await cur.fetchone()
+            if data:
+                return await update.message.reply_text(f"📊 Stats:\n💳 Credits: {data[0]}\n🔎 Searches: {data[1]}")
 
-    await context.bot.send_message(
-    LOG_CHANNEL,
-    f"User {user} searched {text}"
-    )
+    if text == "👥 Refer":
+        link = f"https://t.me/{(await context.bot.get_me()).username}?start={user_id}"
+        return await update.message.reply_text(f"👥 Refer kore income koro:\n{link}")
 
-# ---------------- ADMIN ----------------
+    if text == "🔎 Search":
+        context.user_data["mode"] = "search"
+        return await update.message.reply_text("Chat ID-ta dao mama:", reply_markup=back_menu)
 
-async def admin(update:Update):
+    # Search Logic
+    if context.user_data.get("mode") == "search":
+        async with aiosqlite.connect("bot.db") as db:
+            cur = await db.execute("SELECT credits FROM users WHERE user_id=?", (user_id,))
+            res = await cur.fetchone()
+            if not res or res[0] < 1:
+                return await update.message.reply_text("❌ Credit sesh! Refer koro.")
 
-    if update.effective_user.id!=ADMIN_ID:
-        return
+            wait = await update.message.reply_text("⏳ Wait, khujchhi...")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(API_URL + text) as r:
+                    data = await r.json() if r.status == 200 else None
 
-    async with aiosqlite.connect("bot.db") as db:
+            if data and data.get("data", {}).get("found"):
+                info = data["data"]
+                msg = f"✅ Result:\n📞 Number: {info['number']}\n🌍 Country: {info['country']}"
+                await db.execute("UPDATE users SET credits=credits-1, searches=searches+1 WHERE user_id=?", (user_id,))
+                await db.commit()
+            else:
+                msg = "❌ Kichu pawa jayni!"
+            
+            await wait.edit_text(msg)
+            await context.bot.send_message(LOG_CHANNEL, f"Log: {user_id} searched {text}")
 
-        cur=await db.execute("SELECT COUNT(*) FROM users")
-        users=(await cur.fetchone())[0]
-
-    await update.message.reply_text(
-    f"""
-👮 Admin Panel
-
-👤 Total Users : {users}
-
-Commands:
-
-/addcredit USERID AMOUNT
-/removecredit USERID AMOUNT
-/botoff
-/boton
-/userdata USERID
-"""
-    )
-
-# ---------------- CREDIT CONTROL ----------------
-
-async def addcredit(update:Update,context):
-
-    if update.effective_user.id!=ADMIN_ID:
-        return
-
-    uid=int(context.args[0])
-    amt=int(context.args[1])
-
-    async with aiosqlite.connect("bot.db") as db:
-
-        await db.execute(
-        "UPDATE users SET credits=credits+? WHERE user_id=?",(amt,uid)
-        )
-
-        await db.commit()
-
-    await update.message.reply_text("✅ Credit Added")
-
-async def removecredit(update:Update,context):
-
-    if update.effective_user.id!=ADMIN_ID:
-        return
-
-    uid=int(context.args[0])
-    amt=int(context.args[1])
-
-    async with aiosqlite.connect("bot.db") as db:
-
-        await db.execute(
-        "UPDATE users SET credits=credits-? WHERE user_id=?",(amt,uid)
-        )
-
-        await db.commit()
-
-    await update.message.reply_text("✅ Credit Removed")
-
-# ---------------- USER DATA ----------------
-
-async def userdata(update:Update,context):
-
-    if update.effective_user.id!=ADMIN_ID:
-        return
-
-    uid=int(context.args[0])
-
-    async with aiosqlite.connect("bot.db") as db:
-
-        cur=await db.execute(
-        "SELECT * FROM users WHERE user_id=?",(uid,)
-        )
-
-        data=await cur.fetchone()
-
-    await update.message.reply_text(
-    f"""
-User : {uid}
-Credits : {data[1]}
-Searches : {data[3]}
-"""
-    )
-
-# ---------------- RUN BOT ----------------
-
+# --- RUNNER ---
 def main():
+    # Database initialize korar jonno ekbar loop run kora
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(init_db())
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    # Application build
+    app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start",start))
-    app.add_handler(CommandHandler("admin",admin))
-    app.add_handler(CommandHandler("addcredit",addcredit))
-    app.add_handler(CommandHandler("removecredit",removecredit))
-    app.add_handler(CommandHandler("userdata",userdata))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
 
-    app.add_handler(MessageHandler(filters.TEXT,messages))
-
-    app.run_polling()
+    print("Bot is alive!")
+    app.run_polling(close_loop=False) # Pydroid-er loop close hobe na
 
 if __name__ == "__main__":
-
-    import asyncio
-    asyncio.run(init_db())
-
     main()
